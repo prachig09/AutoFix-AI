@@ -68,12 +68,6 @@ jobs:
 
       # The image needs model.joblib. Use the committed one if present;
       # otherwise train it on the runner (deterministic: seed 42).
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements.txt
 
       - name: Ensure model artifact exists
         run: |
