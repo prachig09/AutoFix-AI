@@ -1,0 +1,147 @@
+# =============================================================================
+# AutoFix AI - build, push and deploy to Cloud Run (keyless, via WIF)
+#
+# Required GitHub *repository variables* (Settings > Secrets and variables >
+# Actions > Variables). `scripts/gcp_setup.sh` prints all five values:
+#   GCP_PROJECT_ID
+#   GCP_REGION
+#   GCP_WIF_PROVIDER              projects/<number>/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+#   GCP_DEPLOYER_SERVICE_ACCOUNT  autofix-deployer@<project>.iam.gserviceaccount.com
+#   GCP_RUNTIME_SERVICE_ACCOUNT   autofix-runtime@<project>.iam.gserviceaccount.com
+#
+# One-time prerequisite: the Secret Manager secret `autofix-pii-salt` (see the
+# "one-time setup" commands) because the app refuses to start in production
+# without PII_HASH_SALT.
+#
+# No service-account JSON key is ever stored in GitHub: the job exchanges its
+# short-lived GitHub OIDC token for GCP credentials.
+# =============================================================================
+name: Deploy AutoFix AI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Never run two deployments at once; let a running deploy finish.
+concurrency:
+  group: deploy-autofix-main
+  cancel-in-progress: false
+
+# Least privilege for the GITHUB_TOKEN; id-token is required for WIF.
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SERVICE_NAME: autofix-api
+  AR_REPO: autofix-repo
+  IMAGE_NAME: autofix-api
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  GCP_RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+  IMAGE_URI: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/autofix-repo/autofix-api:${{ github.sha }}
+
+jobs:
+  deploy:
+    name: Build, push and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check required repository variables
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          DEPLOYER_SA: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+        run: |
+          missing=0
+          for name in GCP_PROJECT_ID GCP_REGION GCP_RUNTIME_SERVICE_ACCOUNT WIF_PROVIDER DEPLOYER_SA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository variable for ${name} is not set"
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      # The image needs model.joblib. Use the committed one if present;
+      # otherwise train it on the runner (deterministic: seed 42).
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Ensure model artifact exists
+        run: |
+          if [ -f model.joblib ]; then
+            echo "Using committed model.joblib ($(du -h model.joblib | cut -f1))"
+          else
+            echo "model.joblib not found - training on the runner"
+            pip install --no-cache-dir -r requirements.txt
+            python train_model.py --out-dir .
+          fi
+          test -s model.joblib
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build container image
+        run: docker build --pull --tag "${IMAGE_URI}" .
+
+      - name: Push container image
+        run: docker push "${IMAGE_URI}"
+
+      # Cost guardrails (free-trial friendly):
+      #   --min-instances=0   scale to zero when idle (no idle charges)
+      #   --max-instances=2   hard cap on concurrent containers => bounded spend
+      #   --memory=512Mi --cpu=1   smallest practical size for XGBoost + FastAPI
+      #   --concurrency=8     requests per container; one uvicorn worker, one vCPU
+      #   --timeout=30        request deadline (Gemini call itself caps at 8s)
+      #   --cpu-boost         extra CPU only during startup => faster cold start
+      #   --no-allow-unauthenticated   private service; callers need an ID token,
+      #                       so strangers cannot burn your credits
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE_NAME}" \
+            --image="${IMAGE_URI}" \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --platform=managed \
+            --service-account="${GCP_RUNTIME_SERVICE_ACCOUNT}" \
+            --min-instances=0 \
+            --max-instances=2 \
+            --memory=512Mi \
+            --cpu=1 \
+            --concurrency=8 \
+            --timeout=30 \
+            --cpu-boost \
+            --no-allow-unauthenticated \
+            --set-env-vars="APP_ENV=production,GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_LOCATION=us-central1,GEMINI_MODEL=gemini-2.5-flash,LLM_TIMEOUT_S=8,BQ_LOGGING_ENABLED=true,BQ_DATASET=autofix_db,BQ_TABLE=telemetry_logs" \
+            --set-secrets="PII_HASH_SALT=autofix-pii-salt:latest" \
+            --quiet
+
+      - name: Show service URL
+        run: |
+          URL="$(gcloud run services describe "${SERVICE_NAME}" \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --format='value(status.url)')"
+          echo "Deployed ${IMAGE_URI}"
+          echo "Service URL: ${URL}"
+          echo "### Deployed" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Image: \`${IMAGE_URI}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- URL: ${URL} (private; call with an identity token)" >> "${GITHUB_STEP_SUMMARY}"
