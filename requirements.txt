@@ -1,0 +1,34 @@
+# =============================================================================
+# AutoFix AI - dependencies (Python 3.11, CPU-only)
+#
+# Footprint notes (approximate installed size, Linux x86_64):
+#   numpy ~17MB | pandas ~12MB | scipy+scikit-learn ~45MB | xgboost-cpu ~3MB
+#   pydantic/fastapi/uvicorn ~10MB | google-cloud-bigquery + grpc ~30MB
+#   google-genai ~10MB | joblib <1MB   => roughly 130-150MB total
+#
+# Why `xgboost-cpu` instead of `xgboost`:
+#   Since 2.1 the default `xgboost` wheel on Linux pulls in nvidia-nccl-cu12
+#   (~200MB of GPU libs). `xgboost-cpu` is the same API with no CUDA/NCCL.
+#   Import name is still `import xgboost`.
+#
+# Do NOT install both `xgboost` and `xgboost-cpu` in the same environment.
+#
+# Gemini note: Gemini 1.5 Flash has been retired by Google. Make the model ID
+# a config value (e.g. GEMINI_MODEL=gemini-2.5-flash) rather than hardcoding it.
+# =============================================================================
+
+# --- API layer ---------------------------------------------------------------
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0          # plain uvicorn (no [standard] extra) keeps the image small
+pydantic>=2.9,<3.0
+
+# --- ML (CPU only) -----------------------------------------------------------
+xgboost-cpu>=2.1,<4.0
+scikit-learn>=1.5,<2.0
+joblib>=1.4,<2.0
+numpy>=1.26,<3.0
+pandas>=2.2,<3.0
+
+# --- GCP / GenAI -------------------------------------------------------------
+google-genai>=1.0,<2.0
+google-cloud-bigquery>=3.25,<4.0
