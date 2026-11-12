@@ -131,7 +131,7 @@ jobs:
             --timeout=30 \
             --cpu-boost \
             --no-allow-unauthenticated \
-            --set-env-vars="APP_ENV=production,GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_LOCATION=us-central1,GEMINI_MODEL=gemini-2.5-flash,LLM_TIMEOUT_S=8,BQ_LOGGING_ENABLED=true,BQ_DATASET=autofix_db,BQ_TABLE=telemetry_logs" \
+            --set-env-vars="APP_ENV=production,GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_LOCATION=us-central1,GEMINI_MODEL=gemini-3.5-flash-lite,LLM_TIMEOUT_S=8,BQ_LOGGING_ENABLED=true,BQ_DATASET=autofix_db,BQ_TABLE=telemetry_logs" \
             --set-secrets="PII_HASH_SALT=autofix-pii-salt:latest" \
             --quiet
 
