@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoFix AI — Diagnostic Console</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+  .inp{width:100%;margin-top:2px;background:#0f172a;border:1px solid #334155;border-radius:.5rem;padding:.4rem .6rem;color:#e2e8f0;font-size:.85rem}
+  .inp:focus{outline:none;border-color:#38bdf8}
+  .btn{border-radius:.5rem;padding:.4rem .8rem;font-size:.8rem;font-weight:600;border:1px solid #334155;background:#1e293b;color:#e2e8f0}
+  .btn:hover{background:#334155}.btn:disabled{opacity:.5}
+  .pri{background:#0284c7;border-color:#0284c7;color:#fff}.pri:hover{background:#0ea5e9}
+  .tab-on{background:#0284c7;color:#fff}
+  .bar{transition:width .8s ease}
+  pre{white-space:pre-wrap;word-break:break-word}
+</style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+
+<header class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur border-b border-slate-800 px-4 py-3">
+  <h1 class="text-sm sm:text-base font-semibold text-white">AutoFix AI — Hybrid ML + GenAI Predictive Maintenance &amp; Diagnostic Engine</h1>
+  <div class="mt-2 flex flex-wrap gap-2 items-center">
+    <input id="base" class="inp !w-72 !mt-0" value="http://localhost:8080" spellcheck="false" aria-label="API base URL">
+    <button id="connect" class="btn pri">Connect &amp; Sync Schema</button>
+    <span id="pill" class="text-xs px-2.5 py-1 rounded-full bg-slate-700 text-slate-300">● Not connected</span>
+    <span id="schemaNote" class="text-xs text-slate-400"></span>
+  </div>
+</header>
+
+<div id="banner" class="px-4 pt-3 max-w-7xl mx-auto"></div>
+
+<main class="grid lg:grid-cols-5 gap-4 p-4 max-w-7xl mx-auto">
+  <section class="lg:col-span-2 space-y-3">
+    <div class="flex gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 w-fit">
+      <button class="btn tab-on !border-0" data-tab="scan">/scan</button>
+      <button class="btn !border-0 !bg-transparent" data-tab="verify">Verify Repair</button>
+    </div>
+
+    <div id="p-scan" class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+      <div class="flex flex-wrap gap-2">
+        <button class="btn" data-preset="normal">Normal Operation</button>
+        <button class="btn" data-preset="critical">Critical Fault</button>
+        <button class="btn" data-preset="ambiguous">Ambiguous / Low-Confidence</button>
+      </div>
+      <div class="flex gap-2 text-xs">
+        <button id="m-form" class="btn tab-on">Form</button><button id="m-json" class="btn">Raw JSON</button>
+      </div>
+      <div id="form" class="grid grid-cols-2 gap-3"></div>
+      <textarea id="json" rows="10" class="inp font-mono hidden" spellcheck="false"></textarea>
+      <button id="runScan" class="btn pri w-full">Run diagnostic scan</button>
+    </div>
+
+    <div id="p-verify" class="hidden bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+      <p class="text-xs text-slate-400">Request body for <code class="text-sky-300">/post-repair-check</code>. Run a scan first and it is pre-filled (pre-repair = your scan input, post-repair = sample healthy rescan). Edit freely.</p>
+      <textarea id="vjson" rows="16" class="inp font-mono" spellcheck="false"></textarea>
+      <button id="runVerify" class="btn pri w-full">Verify repair</button>
+    </div>
+  </section>
+
+  <section id="results" class="lg:col-span-3 space-y-3">
+    <div class="bg-slate-900 border border-dashed border-slate-700 rounded-xl p-8 text-center text-slate-500 text-sm">
+      Click <b>Connect &amp; Sync Schema</b>, choose a preset and run a scan. Results appear here.
+    </div>
+  </section>
+</main>
+
+<footer class="max-w-7xl mx-auto px-4 pb-8">
+  <h2 class="text-xs uppercase tracking-widest text-slate-500 mb-2">Production MLOps pipeline</h2>
+  <div id="pipe" class="flex flex-wrap items-stretch gap-2 text-xs"></div>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const PROJECT = 'dazzling-task-506108-t2', REGION = 'us-central1';
+const DEF = [
+  ['rpm',600,4000],['coolant_temp_c',70,115],['short_fuel_trim_pct',-25,25],
+  ['long_fuel_trim_pct',-25,25],['intake_pressure_kpa',20,100],['engine_load_pct',0,100]
+].map(([name,min,max]) => ({name,min,max,type:'number'}));
+const PRESETS = {
+  normal:    {rpm:2200,coolant_temp_c:92, short_fuel_trim_pct:1,  long_fuel_trim_pct:0.5,intake_pressure_kpa:52,engine_load_pct:38},
+  critical:  {rpm:2400,coolant_temp_c:112,short_fuel_trim_pct:1.5,long_fuel_trim_pct:0.8,intake_pressure_kpa:56,engine_load_pct:42},
+  ambiguous: {rpm:1500,coolant_temp_c:100,short_fuel_trim_pct:7,  long_fuel_trim_pct:6,  intake_pressure_kpa:58,engine_load_pct:30}
+};
+let spec = null, fields = DEF, mode = 'form', last = {};
+
+// ---------- schema helpers (OpenAPI) ----------
+const deref = s => (s && s.$ref) ? deref(spec.components.schemas[s.$ref.split('/').pop()]) : s;
+function norm(s) {
+  s = deref(s); if (!s) return s;
+  if (s.allOf) return norm(s.allOf[0]);
+  if (s.anyOf) { const n = s.anyOf.find(x => x.type !== 'null'); return n ? norm(n) : s; }
+  return s;
+}
+const bodySchema = p => norm(spec?.paths?.[p]?.post?.requestBody?.content?.['application/json']?.schema);
+function skeleton(s) {
+  s = norm(s); if (!s) return null;
+  if (s.properties) { const o = {}; for (const [k,p] of Object.entries(s.properties)) if ((s.required||[]).includes(k)) o[k] = skeleton(p); return o; }
+  if (s.type === 'array') { const i = skeleton(s.items); return [i === '' ? 'Describe repair performed' : i]; }
+  if (s.type === 'number' || s.type === 'integer') return (s.minimum != null && s.maximum != null) ? +((s.minimum + s.maximum) / 2).toFixed(1) : 0;
+  return s.type === 'boolean' ? false : '';
+}
+
+// ---------- form <-> JSON ----------
+function buildForm() {
+  $('form').innerHTML = fields.map(f => `<label class="block text-xs text-slate-400">${esc(f.name)}
+    <input data-k="${esc(f.name)}" type="${f.type}" step="any" ${f.min!=null?`min="${f.min}"`:''} ${f.max!=null?`max="${f.max}"`:''}
+    placeholder="${f.min!=null?f.min+' … '+f.max:''}" class="inp"></label>`).join('');
+  $('form').querySelectorAll('input').forEach(i => i.oninput = () => $('json').value = JSON.stringify(formObj(), null, 2));
+}
+function formObj() {
+  const o = {};
+  $('form').querySelectorAll('input').forEach(i => { if (i.value !== '') o[i.dataset.k] = i.type === 'number' ? Number(i.value) : i.value; });
+  return o;
+}
+function setPayload(o) {
+  $('form').querySelectorAll('input').forEach(i => { if (i.dataset.k in o) i.value = o[i.dataset.k]; });
+  $('json').value = JSON.stringify(o, null, 2);
+}
+function setMode(m) {
+  mode = m;
+  $('form').classList.toggle('hidden', m !== 'form'); $('json').classList.toggle('hidden', m !== 'json');
+  $('m-form').classList.toggle('tab-on', m === 'form'); $('m-json').classList.toggle('tab-on', m === 'json');
+}
+
+// ---------- HTTP ----------
+async function api(path, body) {
+  const url = $('base').value.trim().replace(/\/+$/, '') + path, t = performance.now();
+  let res;
+  try { res = await fetch(url, {method: body ? 'POST' : 'GET', headers: body ? {'Content-Type':'application/json'} : {}, body: body ? JSON.stringify(body) : undefined}); }
+  catch (e) { throw {kind:'network'}; }
+  const ms = Math.round(performance.now() - t), txt = await res.text();
+  let data; try { data = JSON.parse(txt); } catch { data = txt; }
+  return {res, data, ms};
+}
+function showErr(e) {
+  const proxy = `gcloud run services proxy autofix-api --project=${PROJECT} --region=${REGION}`;
+  const open = `gcloud run services add-iam-policy-binding autofix-api --member=allUsers --role=roles/run.invoker --project=${PROJECT} --region=${REGION}`;
+  let h;
+  if (e.kind === 'network' || e.status === 403) {
+    h = `<b>${e.status === 403 ? '403 Forbidden — the Cloud Run service is private.' : 'Network / CORS error — the browser could not reach or was blocked by the API.'}</b>
+      <ul class="list-disc ml-5 mt-1 space-y-1">
+        <li>Recommended: run <code class="text-amber-200">${esc(proxy)}</code> and keep the base URL <code>http://localhost:8080</code>.</li>
+        <li>Public demo only: <code class="text-amber-200">${esc(open)}</code></li>
+        <li>Either way the API must return CORS headers (add FastAPI <code>CORSMiddleware</code>); opening this file from disk sends origin <code>null</code>.</li>
+      </ul>`;
+  } else h = `<b>HTTP ${esc(e.status)}</b> — <code>${esc(typeof e.data === 'string' ? e.data : JSON.stringify(e.data))}</code>`;
+  $('banner').innerHTML = `<div class="rounded-lg border border-amber-500/50 bg-amber-950/60 text-amber-100 text-sm p-3">${h}</div>`;
+}
+const clearErr = () => $('banner').innerHTML = '';
+function setPill(state, ms) {
+  const p = $('pill');
+  const m = {ok:['bg-emerald-900 text-emerald-300', `● Online · ${ms} ms`], bad:['bg-red-900 text-red-300','● Offline'], wait:['bg-slate-700 text-slate-300','● Connecting…']}[state];
+  p.className = 'text-xs px-2.5 py-1 rounded-full ' + m[0]; p.textContent = m[1];
+}
+
+async function connect() {
+  setPill('wait'); clearErr();
+  try {
+    const {res, data, ms} = await api('/health');
+    if (!res.ok) throw {kind:'http', status:res.status, data};
+    setPill('ok', ms);
+  } catch (e) { setPill('bad'); showErr(e); return; }
+  try {
+    const r = await api('/openapi.json');
+    if (r.res.ok && r.data.paths) { spec = r.data; $('schemaNote').textContent = '✓ schema synced from /openapi.json'; }
+    else throw 0;
+  } catch { spec = null; $('schemaNote').textContent = 'openapi.json unavailable (disabled when APP_ENV=production) — using built-in fields'; }
+  const s = spec && bodySchema('/scan');
+  fields = (s && s.properties) ? Object.entries(s.properties).map(([name,p]) => { p = norm(p); return {name, min:p.minimum, max:p.maximum, type:p.type === 'string' ? 'text' : 'number'}; }) : DEF;
+  buildForm(); setPayload(PRESETS.normal);
+  if (spec && bodySchema('/post-repair-check')) $('vjson').value = JSON.stringify(skeleton(bodySchema('/post-repair-check')), null, 2);
+}
+
+// ---------- rendering ----------
+const COL = {
+  emerald:['bg-emerald-500/15 text-emerald-300 border-emerald-500/40','bg-emerald-500'],
+  amber:['bg-amber-500/15 text-amber-300 border-amber-500/40','bg-amber-500'],
+  red:['bg-red-500/15 text-red-300 border-red-500/40','bg-red-500'],
+  sky:['bg-sky-500/15 text-sky-300 border-sky-500/40','bg-sky-500']
+};
+const badge = (t, c='sky') => `<span class="text-xs px-2 py-0.5 rounded-full border ${COL[c][0]}">${esc(t)}</span>`;
+const card = h => `<div class="bg-slate-900 border border-slate-800 rounded-xl p-4">${h}</div>`;
+const bar = (pct, c) => `<div class="h-2.5 rounded-full bg-slate-800 overflow-hidden"><div class="bar h-full ${COL[c][1]}" style="width:0" data-w="${Math.max(0,Math.min(100,pct))}%"></div></div>`;
+const raw = (rq, rs, ms, st) => `<details class="bg-slate-900 border border-slate-800 rounded-xl p-3"><summary class="cursor-pointer text-sm text-slate-300">Raw HTTP inspector · status ${esc(st)} · ${ms} ms</summary>
+  <div class="grid md:grid-cols-2 gap-2 mt-2 text-xs font-mono">
+  <div><div class="text-slate-500 mb-1">Request</div><pre class="bg-slate-950 p-2 rounded">${esc(JSON.stringify(rq, null, 2))}</pre></div>
+  <div><div class="text-slate-500 mb-1">Response</div><pre class="bg-slate-950 p-2 rounded">${esc(JSON.stringify(rs, null, 2))}</pre></div></div></details>`;
+function paint(html) {
+  $('results').innerHTML = html;
+  requestAnimationFrame(() => document.querySelectorAll('[data-w]').forEach(b => b.style.width = b.dataset.w));
+}
+
+function renderScan(rq, r, ms, st) {
+  const c = !r.is_fault ? 'emerald' : (r.low_confidence ? 'amber' : 'red'), pct = +(r.confidence * 100).toFixed(1);
+  const probs = Object.entries(r.probabilities || {}).sort((a, b) => b[1] - a[1]);
+  paint(
+    card(`<div class="flex flex-wrap items-center gap-2">
+      <span class="text-lg font-bold px-3 py-1 rounded-lg border ${COL[c][0]}">${esc(r.fault_state)}</span>
+      ${r.is_fault ? badge('Fault detected', c) : badge('Healthy', 'emerald')}
+      ${r.low_confidence ? badge('⚠ Low confidence', 'amber') : ''}</div>
+      <div class="mt-3 flex justify-between text-xs text-slate-400"><span>Confidence</span><span>${pct}%</span></div>${bar(pct, c)}`) +
+    card(`<h3 class="text-sm font-semibold mb-2">Class probabilities</h3><div class="space-y-2">${probs.map(([k, v]) =>
+      `<div><div class="flex justify-between text-xs"><span>${esc(k)}</span><span class="text-slate-400">${(v * 100).toFixed(1)}%</span></div>${bar(v * 100, 'sky')}</div>`).join('')}</div>`) +
+    (r.safety_notice ? `<div class="rounded-xl border-2 border-amber-500/70 bg-amber-950/60 p-4 text-amber-100 text-sm"><b>⚠ Safety notice:</b> ${esc(r.safety_notice)}</div>` : '') +
+    card(`<div class="flex flex-wrap items-center gap-2 mb-3"><h3 class="text-sm font-semibold mr-2">AI repair runbook</h3>
+      ${badge('source: ' + r.repair_source, r.repair_source === 'gemini' ? 'emerald' : 'amber')}${badge('model ' + r.model_version)}${badge('req ' + r.request_id)}</div>
+      ${(r.repair_steps || []).length ? `<ol class="space-y-2">${r.repair_steps.map((s, i) => `<li class="flex gap-3 text-sm"><span class="shrink-0 w-6 h-6 rounded-full bg-sky-600 text-white text-xs flex items-center justify-center">${i + 1}</span><span>${esc(s)}</span></li>`).join('')}</ol>`
+      : '<p class="text-sm text-slate-400">No repair required for a healthy state.</p>'}`) +
+    `<button id="toVerify" class="btn pri">Verify repair →</button>` + raw(rq, r, ms, st));
+  $('toVerify').onclick = () => tab('verify');
+}
+
+function renderVerify(rq, r, ms, st) {
+  const sc = {RESOLVED:'emerald', PARTIALLY_RESOLVED:'amber', NO_PRIOR_ANOMALY:'sky', UNRESOLVED:'red', REGRESSED:'red'}[r.resolution_status] || 'sky';
+  const b = last.scanRes, a = r.post_repair_classification || {};
+  const side = (t, name, conf, col) => `<div class="flex-1 rounded-lg border ${COL[col][0]} p-3"><div class="text-xs opacity-70">${t}</div><div class="font-bold">${esc(name)}</div><div class="text-xs">${(conf * 100).toFixed(1)}% confidence</div></div>`;
+  paint(
+    card(`<div class="flex items-center gap-2 mb-3"><h3 class="text-sm font-semibold">Before vs after</h3>${badge(r.resolution_status, sc)}</div>
+      <div class="flex gap-3 items-center">${b ? side('Before (scan)', b.fault_state, b.confidence, b.is_fault ? 'red' : 'emerald') : side('Before', 'n/a', 0, 'sky')}
+      <span class="text-xl text-slate-500">→</span>${side('After (rescan)', a.fault_state, a.confidence || 0, a.fault_state === 'Normal' ? 'emerald' : 'red')}</div>
+      <div class="mt-4 flex justify-between text-xs text-slate-400"><span>Parameter normalization</span><span>${r.normalization_pct}%</span></div>${bar(r.normalization_pct, sc)}
+      <p class="text-xs text-slate-400 mt-2">Out of range before: ${(r.pre_repair_anomalies || []).map(esc).join(', ') || 'none'}</p>`) +
+    card(`<h3 class="text-sm font-semibold mb-2">Remaining anomalies</h3>${(r.remaining_anomalies || []).length ? `<ul class="space-y-1 text-sm">${r.remaining_anomalies.map(x =>
+      `<li class="flex flex-wrap gap-2 items-center"><code class="text-red-300">${esc(x.parameter)}</code> ${esc(x.observed_value)} ${esc(x.unit)} <span class="text-slate-500">(healthy ${x.healthy_min}…${x.healthy_max}, off by ${x.deviation})</span>${x.improved ? badge('improved', 'amber') : ''}${x.newly_introduced ? badge('new', 'red') : ''}</li>`).join('')}</ul>`
+      : '<p class="text-sm text-emerald-300">All monitored parameters are within healthy range.</p>'}`) +
+    ((r.notes || []).length ? card(`<h3 class="text-sm font-semibold mb-2">Notes</h3><ul class="list-disc ml-5 text-sm space-y-1 text-slate-300">${r.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>`) : '') +
+    raw(rq, r, ms, st));
+}
+
+// ---------- actions ----------
+async function run(btn, label, fn) {
+  btn.disabled = true; btn.textContent = 'Working…'; clearErr();
+  try { await fn(); } catch (e) { showErr(e); } finally { btn.disabled = false; btn.textContent = label; }
+}
+function parseJson(text) {
+  try { return JSON.parse(text); } catch (e) { throw {status:'—', data:'Invalid JSON: ' + e.message}; }
+}
+$('runScan').onclick = () => run($('runScan'), 'Run diagnostic scan', async () => {
+  const body = mode === 'form' ? formObj() : parseJson($('json').value);
+  const {res, data, ms} = await api('/scan', body);
+  if (!res.ok) throw {status:res.status, data};
+  setPill('ok', ms); last = {scanReq: body, scanRes: data};
+  renderScan(body, data, ms, res.status);
+  const sk = spec && bodySchema('/post-repair-check');
+  const v = sk ? skeleton(sk) : {pre_repair:{}, repair_actions:[''], post_repair:{}};
+  v.pre_repair = Object.fromEntries(Object.entries(body).filter(([k]) => k in PRESETS.normal));
+  v.post_repair = {...PRESETS.normal};
+  v.repair_actions = [data.is_fault ? 'Performed repair per AI runbook steps' : 'Routine inspection'];
+  $('vjson').value = JSON.stringify(v, null, 2);
+});
+$('runVerify').onclick = () => run($('runVerify'), 'Verify repair', async () => {
+  const body = parseJson($('vjson').value);
+  const {res, data, ms} = await api('/post-repair-check', body);
+  if (!res.ok) throw {status:res.status, data};
+  renderVerify(body, data, ms, res.status);
+});
+function tab(t) {
+  ['scan', 'verify'].forEach(x => { $('p-' + x).classList.toggle('hidden', x !== t);
+    const b = document.querySelector(`[data-tab="${x}"]`); b.classList.toggle('tab-on', x === t); b.classList.toggle('!bg-transparent', x !== t); });
+}
+document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => tab(b.dataset.tab));
+document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => setPayload(PRESETS[b.dataset.preset]));
+$('m-form').onclick = () => setMode('form');
+$('m-json').onclick = () => { $('json').value = JSON.stringify(formObj(), null, 2); setMode('json'); };
+$('connect').onclick = connect;
+
+// ---------- pipeline strip ----------
+$('pipe').innerHTML = [
+  ['GitHub Actions','OIDC · keyless WIF'],['Artifact Registry','autofix-repo'],['Cloud Run','FastAPI + XGBoost'],
+  ['Vertex AI','Gemini repair guide'],['BigQuery','autofix_db.telemetry_logs']
+].map(([a, b], i) => (i ? '<span class="self-center text-sky-500 text-lg">→</span>' : '') +
+  `<div class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"><div class="font-semibold text-slate-100">${a}</div><div class="text-slate-400">${b}</div></div>`).join('');
+
+buildForm(); setPayload(PRESETS.normal);
+</script>
+</body>
+</html>
