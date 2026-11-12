@@ -86,6 +86,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from fastapi.middleware.cors import CORSMiddleware
+
 APP_VERSION = "1.0.0"
 NORMAL_LABEL = "Normal"
 MAX_BODY_BYTES = 16 * 1024  # telemetry payloads are tiny; reject anything larger
@@ -925,8 +927,13 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None if _IS_PROD else "/openapi.json",
 )
-app.add_middleware(RequestContextMiddleware)
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
